@@ -1,0 +1,208 @@
+import pandas as pd
+import numpy as np
+import holidays
+
+
+def create_monthly_time_series_features(
+    df: pd.DataFrame,
+    date_col: str,
+    target_col: str,
+    event_dates: dict | None = None,
+    current_year: int = 2026,
+) -> pd.DataFrame:
+    """
+    Create lag features, rolling statistics, event flags, and US holiday features
+    for a monthly dataset from 2019 to current_year.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing monthly data.
+    date_col : str
+        Name of the date column.
+    target_col : str
+        Name of the target column.
+    event_dates : dict | None
+        Dictionary of custom events.
+        Example:
+        {
+            "covid_start": ["2020-03-01", "2020-04-01", "2020-05-01"],
+            "major_campaign": ["2022-11-01", "2022-12-01"]
+        }
+    current_year : int
+        Current year to build US holiday calendar through.
+
+    Returns
+    -------
+    pd.DataFrame
+        Dataframe with engineered features.
+    """
+
+    df = df.copy()
+
+    # Ensure datetime and sort
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.sort_values(date_col).reset_index(drop=True)
+
+    # Keep only 2019 through current year
+    df = df[
+        (df[date_col].dt.year >= 2019) &
+        (df[date_col].dt.year <= current_year)
+    ].copy()
+
+    # ---------------------------
+    # Basic calendar features
+    # ---------------------------
+    df["year"] = df[date_col].dt.year
+    df["month"] = df[date_col].dt.month
+    df["quarter"] = df[date_col].dt.quarter
+    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+
+    # Month start / end flags
+    # For monthly data, these are less useful, but kept if needed
+    df["is_year_start"] = (df["month"] == 1).astype(int)
+    df["is_year_end"] = (df["month"] == 12).astype(int)
+    df["is_quarter_start"] = df["month"].isin([1, 4, 7, 10]).astype(int)
+    df["is_quarter_end"] = df["month"].isin([3, 6, 9, 12]).astype(int)
+
+    # ---------------------------
+    # Lag features
+    # ---------------------------
+    lag_periods = [1, 2, 3, 6, 12]
+    for lag in lag_periods:
+        df[f"{target_col}_lag_{lag}"] = df[target_col].shift(lag)
+
+    # ---------------------------
+    # Rolling statistics
+    # Use shifted target to avoid leakage
+    # ---------------------------
+    rolling_windows = [3, 6, 12]
+    shifted_target = df[target_col].shift(1)
+
+    for window in rolling_windows:
+        df[f"{target_col}_roll_mean_{window}"] = shifted_target.rolling(window=window).mean()
+        df[f"{target_col}_roll_std_{window}"] = shifted_target.rolling(window=window).std()
+        df[f"{target_col}_roll_min_{window}"] = shifted_target.rolling(window=window).min()
+        df[f"{target_col}_roll_max_{window}"] = shifted_target.rolling(window=window).max()
+
+    # ---------------------------
+    # Growth / momentum features
+    # ---------------------------
+    df[f"{target_col}_mom_1"] = df[target_col].shift(1) - df[target_col].shift(2)
+    df[f"{target_col}_mom_3"] = df[target_col].shift(1) - df[target_col].shift(4)
+
+    df[f"{target_col}_pct_change_1"] = df[target_col].shift(1).pct_change(periods=1)
+    df[f"{target_col}_pct_change_3"] = df[target_col].shift(1).pct_change(periods=3)
+    df[f"{target_col}_pct_change_12"] = df[target_col].shift(1).pct_change(periods=12)
+
+    # ---------------------------
+    # US Holiday features
+    # For monthly data, useful features are:
+    # - number of US holidays in the month
+    # - whether the month contains major holidays
+    # ---------------------------
+    us_holidays = holidays.US(years=range(2019, current_year + 1))
+
+    holiday_df = pd.DataFrame(
+        {
+            "holiday_date": pd.to_datetime(list(us_holidays.keys())),
+            "holiday_name": list(us_holidays.values()),
+        }
+    )
+
+    holiday_df["year"] = holiday_df["holiday_date"].dt.year
+    holiday_df["month"] = holiday_df["holiday_date"].dt.month
+
+    # Count holidays per month
+    holiday_counts = (
+        holiday_df.groupby(["year", "month"])
+        .size()
+        .reset_index(name="us_holiday_count")
+    )
+
+    df = df.merge(holiday_counts, on=["year", "month"], how="left")
+    df["us_holiday_count"] = df["us_holiday_count"].fillna(0).astype(int)
+
+    # Major holiday flags
+    major_holiday_map = {
+        "has_new_year": ["New Year's Day"],
+        "has_memorial_day": ["Memorial Day"],
+        "has_independence_day": ["Independence Day"],
+        "has_labor_day": ["Labor Day"],
+        "has_thanksgiving": ["Thanksgiving Day"],
+        "has_christmas": ["Christmas Day"],
+    }
+
+    for feature_name, holiday_names in major_holiday_map.items():
+        tmp = holiday_df[holiday_df["holiday_name"].isin(holiday_names)].copy()
+        tmp[feature_name] = 1
+        tmp = tmp.groupby(["year", "month"])[feature_name].max().reset_index()
+        df = df.merge(tmp, on=["year", "month"], how="left")
+        df[feature_name] = df[feature_name].fillna(0).astype(int)
+
+    # Black Friday proxy:
+    # monthly flag = 1 if Thanksgiving exists in the month (November)
+    df["has_black_friday_period"] = df["has_thanksgiving"].astype(int)
+
+    # Holiday season flag
+    df["is_holiday_season"] = df["month"].isin([11, 12]).astype(int)
+
+    # ---------------------------
+    # Custom event flags
+    # Example:
+    # {
+    #   "covid_start": ["2020-03-01", "2020-04-01"],
+    #   "product_launch": ["2023-09-01"]
+    # }
+    # ---------------------------
+    if event_dates is not None:
+        df["_month_start"] = df[date_col].values.astype("datetime64[M]")
+
+        for event_name, dates in event_dates.items():
+            event_months = pd.to_datetime(dates).values.astype("datetime64[M]")
+            df[f"event_{event_name}"] = df["_month_start"].isin(event_months).astype(int)
+
+        df.drop(columns=["_month_start"], inplace=True)
+
+    # ---------------------------
+    # Optional trend index
+    # ---------------------------
+    df["time_idx"] = np.arange(len(df))
+
+    return df
+
+
+# ---------------------------
+# Example usage
+# ---------------------------
+if __name__ == "__main__":
+    # Example monthly dataset
+    dates = pd.date_range(start="2019-01-01", end="2026-12-01", freq="MS")
+    np.random.seed(42)
+
+    data = pd.DataFrame(
+        {
+            "date": dates,
+            "y": 100 + np.random.normal(0, 5, len(dates)).cumsum()
+        }
+    )
+
+    # Example custom events
+    custom_events = {
+        "covid_start": ["2020-03-01", "2020-04-01", "2020-05-01"],
+        "promo_campaign": ["2022-11-01", "2022-12-01", "2023-11-01", "2023-12-01"],
+        "product_launch": ["2024-06-01"]
+    }
+
+    feature_df = create_monthly_time_series_features(
+        df=data,
+        date_col="date",
+        target_col="y",
+        event_dates=custom_events,
+        current_year=2026
+    )
+
+    print(feature_df.head(15))
+    print("\nColumns created:")
+    print(feature_df.columns.tolist())
