@@ -2,6 +2,53 @@ import pandas as pd
 import numpy as np
 import holidays
 
+def create_features(history):
+    features = {}
+
+    # lags
+    for lag in [1,2,3,6,12]:
+        features[f'Rate_lag_{lag}'] = history[-lag]
+
+    # rolling
+    features['Rate_roll_mean_3'] = np.mean(history[-3:])
+    features['Rate_roll_std_3']  = np.std(history[-3:])
+    features['Rate_roll_min_3']  = np.min(history[-3:])
+    features['Rate_roll_max_3']  = np.max(history[-3:])
+
+    features['Rate_roll_mean_6'] = np.mean(history[-6:])
+    features['Rate_roll_std_6']  = np.std(history[-6:])
+    features['Rate_roll_min_6']  = np.min(history[-6:])
+    features['Rate_roll_max_6']  = np.max(history[-6:])
+
+    features['Rate_roll_mean_12'] = np.mean(history[-12:])
+    features['Rate_roll_std_12']  = np.std(history[-12:])
+    features['Rate_roll_min_12']  = np.min(history[-12:])
+    features['Rate_roll_max_12']  = np.max(history[-12:])
+
+    # momentum
+    features['Rate_mom_1'] = history[-1] - history[-2]
+    features['Rate_mom_3'] = history[-1] - history[-3]
+
+    # pct change
+    features['Rate_pct_change_1'] = (history[-1] / history[-2]) - 1
+    features['Rate_pct_change_3'] = (history[-1] / history[-3]) - 1
+    features['Rate_pct_change_12'] = (history[-1] / history[-12]) - 1
+
+    return features
+
+predictions = []
+
+for i in range(len(test)):
+
+    X = create_features(history)
+    X = np.array([list(X.values())])
+
+    y_pred = model.predict(X)[0]
+    predictions.append(y_pred)
+
+    # 🔑 CRITICAL: update history with prediction
+    history.append(y_pred)
+
 
 def create_monthly_time_series_features(
     df: pd.DataFrame,
