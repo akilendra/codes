@@ -1,0 +1,124 @@
+def evaluate_model(
+    y_train,
+    y_val,
+    X_train,
+    X_val,
+    features,
+    order,
+):
+
+    try:
+
+        model = SARIMAX(
+            y_train,
+            exog=X_train[features],
+            order=order,
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+        )
+
+        result = model.fit(disp=False)
+
+        pred = result.forecast(
+            steps=len(y_val),
+            exog=X_val[features]
+        )
+
+        rmse = np.sqrt(mean_squared_error(y_val, pred))
+
+        return rmse
+
+    except Exception:
+
+        return np.inf
+
+def forward_selection_sarimax(
+    y_train,
+    y_val,
+    X_train,
+    X_val,
+    candidate_features,
+    p_values=[0,1,2],
+    d_values=[0,1],
+    q_values=[0,1,2],
+    min_improvement=0.001,
+):
+
+    orders = list(itertools.product(p_values, d_values, q_values))
+
+    selected_features = []
+    remaining_features = candidate_features.copy()
+
+    best_rmse = np.inf
+    best_order = None
+
+    history = []
+
+    while len(remaining_features) > 0:
+
+        iteration_best_rmse = np.inf
+        iteration_best_feature = None
+        iteration_best_order = None
+
+        for feature in remaining_features:
+
+            current_features = selected_features + [feature]
+
+            for order in orders:
+
+                rmse = evaluate_model(
+                    y_train,
+                    y_val,
+                    X_train,
+                    X_val,
+                    current_features,
+                    order,
+                )
+
+                if rmse < iteration_best_rmse:
+
+                    iteration_best_rmse = rmse
+                    iteration_best_feature = feature
+                    iteration_best_order = order
+
+        improvement = best_rmse - iteration_best_rmse
+
+        if improvement > min_improvement:
+
+            selected_features.append(iteration_best_feature)
+            remaining_features.remove(iteration_best_feature)
+
+            best_rmse = iteration_best_rmse
+            best_order = iteration_best_order
+
+            history.append({
+                "features": selected_features.copy(),
+                "order": best_order,
+                "rmse": best_rmse
+            })
+
+            print(f"Added {iteration_best_feature}")
+            print(f"Order {best_order}")
+            print(f"Validation RMSE {best_rmse:.4f}")
+            print("-"*50)
+
+        else:
+
+            print("No further improvement.")
+            break
+
+    return selected_features, best_order, best_rmse, history
+
+candidate_features = list(X_train.columns)
+
+selected_features, best_order, best_rmse, history = \
+    forward_selection_sarimax(
+        y_train,
+        y_val,
+        X_train,
+        X_val,
+        candidate_features,
+        p_values=[0,1,2,3],
+        d_values=[0,1],
+        q_values=[0,1,2],
+    )
